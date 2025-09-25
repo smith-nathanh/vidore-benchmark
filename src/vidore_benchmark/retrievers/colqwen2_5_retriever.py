@@ -65,10 +65,10 @@ class ColQwen2_5_Retriever(BaseVisionRetriever):
         )
 
     def process_images(self, images: List[Image.Image], **kwargs):
-        return self.processor.process_images(images=images).to(self.device)
+        return self.processor.process_images(images).to(self.device)
 
     def process_queries(self, queries: List[str], **kwargs):
-        return self.processor.process_queries(queries=queries).to(self.device)
+        return self.processor.process_queries(queries).to(self.device)
 
     def forward_queries(self, queries: List[str], batch_size: int, **kwargs) -> List[torch.Tensor]:
         dataloader = DataLoader(
