@@ -1,0 +1,108 @@
+resources:
+  cloud: gcp
+  accelerators: H100:1
+  memory: 32+
+  disk_size: 256
+  use_spot: true
+  ports: 8888
+  any_of:
+    - region: us-east4
+    - region: us-central1
+    - region: us-east5
+    - region: us-west1
+    - region: us-west4
+
+file_mounts:
+  ~/sky_workdir/.env: ./.env
+  ~/.gitconfig: ~/.gitconfig
+
+workdir: .
+
+setup: |
+  echo -e "\n\n============   SKYPILOT SETUP: Start setup script.   ============\n\n"
+
+  # ========== Update & Install Essentials ==========
+  sudo apt-get update -y
+  sudo apt-get install -y --no-upgrade \
+      curl \
+      git \
+      python3-dev \
+      python3-pip \
+      build-essential \
+      libssl-dev \
+      zlib1g-dev \
+      libbz2-dev \
+      libreadline-dev \
+      libsqlite3-dev \
+      openssh-server
+
+  # Install CUDA 12.1 toolkit (compatible with PyTorch)
+  wget https://developer.download.nvidia.com/compute/cuda/12.1.1/local_installers/cuda_12.1.1_530.30.02_linux.run
+  sudo sh cuda_12.1.1_530.30.02_linux.run --silent --toolkit --override
+  echo 'export PATH="/usr/local/cuda-12.1/bin:$PATH"' >> ~/.bashrc
+  echo 'export LD_LIBRARY_PATH="/usr/local/cuda-12.1/lib64:$LD_LIBRARY_PATH"' >> ~/.bashrc
+  export PATH="/usr/local/cuda-12.1/bin:$PATH"
+  export LD_LIBRARY_PATH="/usr/local/cuda-12.1/lib64:$LD_LIBRARY_PATH"
+
+  # Ensure SSH is running and configured properly
+  sudo systemctl enable ssh
+  sudo systemctl restart ssh
+  sudo sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
+  sudo systemctl restart ssh
+
+  # ========== Setup uv (Python package manager) ==========
+  curl -LsSf https://astral.sh/uv/install.sh  | sh
+  export PATH="$HOME/.cargo/bin:$PATH"
+
+  # ========== Python Environment Setup ==========
+  cd ~/sky_workdir
+  uv venv
+  source .venv/bin/activate
+
+  # ========== Install PyTorch with CUDA 12.1 ==========
+  echo "========== Installing PyTorch with CUDA 12.1 =========="
+
+  # ========== Install Packages ==========
+  uv pip install -e ".[dev]"
+  uv pip install python-dotenv jupyter pynvml hf_xet packaging wandb einops timm
+
+  # Install ninja separately and ensure it's in PATH
+  uv pip install ninja
+  export PATH="$HOME/.local/bin:$PATH"
+
+  echo "========== Checking ninja installation =========="
+  which ninja
+  ninja --version
+  if [ $? -ne 0 ]; then
+    echo "Ninja is not working correctly. Reinstalling ninja..."
+    uv pip uninstall -y ninja && uv pip install ninja
+    export PATH="$HOME/.local/bin:$PATH"
+  else
+    echo "Ninja is installed correctly."
+  fi
+
+  # Show system info before installing flash-attn
+  echo "========== System Information =========="
+  nvcc --version
+  python -c "import torch; print(f'PyTorch version: {torch.__version__}'); print(f'CUDA available: {torch.cuda.is_available()}'); print(f'CUDA version: {torch.version.cuda}'); print(f'GPU: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else \"None\"}')"
+
+  # ========== Install flash attention (build from source) ==========
+  echo "========== Installing flash-attn (build from source) =========="
+  export NINJA_STATUS="[%f/%t] "
+  export MAX_JOBS=4
+  time uv pip install "flash-attn<2.8.0" --no-build-isolation
+  echo "========== flash-attn install completed =========="
+
+  # ========== Configure Jupyter ==========
+  mkdir -p ~/.jupyter
+  cat > ~/.jupyter/jupyter_notebook_config.py << EOF
+  c.NotebookApp.ip = '0.0.0.0'
+  c.NotebookApp.port = 8888
+  c.NotebookApp.open_browser = False
+  c.NotebookApp.allow_remote_access = True
+  EOF
+
+  # Auto-source virtual environment
+  echo 'source ~/sky_workdir/.venv/bin/activate' >> ~/.bashrc
+
+  echo -e "\n\n============   SKYPILOT SETUP: Setup complete!   ============\n\n"

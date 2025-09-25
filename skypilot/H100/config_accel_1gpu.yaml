@@ -1,0 +1,210 @@
+resources:
+  cloud: gcp
+  accelerators: H100:1
+  memory: 32+
+  disk_size: 256
+  use_spot: true
+  ports: 8888
+  any_of:
+    - region: us-east4
+    - region: us-central1
+    - region: us-east5
+    - region: us-west1
+    - region: us-west4
+  # Auto-terminate cluster
+  autostop:
+    idle_minutes: 10
+    down: true  # Use autodown.
+
+
+file_mounts:
+  ~/.gitconfig: ~/.gitconfig
+
+  # MOUNT mode for datasets
+  /gcs/colqwen-ns-data:
+    source: gs://colqwen-ns-data
+    mode: MOUNT
+  
+  # MOUNT mode for models - auto-sync checkpoints and outputs
+  /gcs/colqwen-ns-models:
+    source: gs://colqwen-ns-models
+    mode: MOUNT
+
+workdir: .
+
+setup: |
+  echo -e "\n\n============   SKYPILOT SETUP: Start setup script.   ============\n\n"
+
+  # ========== Update & Install Essentials ==========
+  sudo apt-get update -y
+  sudo apt-get install -y --no-upgrade \
+      curl \
+      git \
+      python3-dev \
+      python3-pip \
+      build-essential \
+      libssl-dev \
+      zlib1g-dev \
+      libbz2-dev \
+      libreadline-dev \
+      libsqlite3-dev \
+      openssh-server
+
+  # Install CUDA 12.1 toolkit (compatible with PyTorch)
+  wget https://developer.download.nvidia.com/compute/cuda/12.1.1/local_installers/cuda_12.1.1_530.30.02_linux.run
+  sudo sh cuda_12.1.1_530.30.02_linux.run --silent --toolkit --override
+  echo 'export PATH="/usr/local/cuda-12.1/bin:$PATH"' >> ~/.bashrc
+  echo 'export LD_LIBRARY_PATH="/usr/local/cuda-12.1/lib64:$LD_LIBRARY_PATH"' >> ~/.bashrc
+  export PATH="/usr/local/cuda-12.1/bin:$PATH"
+  export LD_LIBRARY_PATH="/usr/local/cuda-12.1/lib64:$LD_LIBRARY_PATH"
+
+  # Ensure SSH is running and configured properly
+  sudo systemctl enable ssh
+  sudo systemctl restart ssh
+  sudo sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
+  sudo systemctl restart ssh
+
+  # ========== Setup uv (Python package manager) ==========
+  curl -LsSf https://astral.sh/uv/install.sh  | sh
+  export PATH="$HOME/.cargo/bin:$PATH"
+
+  # ========== Python Environment Setup ==========
+  cd ~/sky_workdir
+  uv venv
+  source .venv/bin/activate
+
+  # ========== Install Packages ==========
+  uv pip install -e ".[dev]"
+  uv pip install python-dotenv jupyter pynvml hf_xet packaging wandb
+
+  # Install ninja separately and ensure it's in PATH
+  uv pip install ninja
+  export PATH="$HOME/.local/bin:$PATH"
+
+  echo "========== Checking ninja installation =========="
+  which ninja
+  ninja --version
+  if [ $? -ne 0 ]; then
+    echo "Ninja is not working correctly. Reinstalling ninja..."
+    uv pip uninstall -y ninja && uv pip install ninja
+    export PATH="$HOME/.local/bin:$PATH"
+  else
+    echo "Ninja is installed correctly."
+  fi
+
+  # Show system info before installing flash-attn
+  echo "========== System Information =========="
+  nvcc --version
+  python -c "import torch; print(f'PyTorch version: {torch.__version__}'); print(f'CUDA available: {torch.cuda.is_available()}'); print(f'CUDA version: {torch.version.cuda}'); print(f'GPU: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else \"None\"}')"
+
+  echo "========== Installing flash-attn (build from source) =========="
+  export NINJA_STATUS="[%f/%t] "
+  export MAX_JOBS=4
+  time uv pip install "flash-attn<2.8.0" --no-build-isolation
+  echo "========== flash-attn install completed =========="
+
+  # Verify flash-attn installation
+  echo "========== Verifying flash-attn installation =========="
+  python -c "
+  import torch
+  print(f'PyTorch version: {torch.__version__}')
+  try:
+      import flash_attn
+      print(f'Flash Attention version: {flash_attn.__version__}')
+      print('Flash Attention imported successfully!')
+  except ImportError as e:
+      print(f'Flash Attention import failed: {e}')
+      exit(1)
+  except Exception as e:
+      print(f'Flash Attention verification failed: {e}')
+      exit(1)
+  "
+  echo "========== flash-attn verification completed =========="
+
+  echo "========== Configuring Accelerate =========="
+  source .venv/bin/activate
+  mkdir -p ~/.cache/huggingface/accelerate
+  cat > ~/.cache/huggingface/accelerate/default_config.yaml << 'EOF'
+  compute_environment: LOCAL_MACHINE
+  debug: false
+  distributed_type: NO
+  downcast_bf16: 'no'
+  gpu_ids: all
+  machine_rank: 0
+  main_training_function: main
+  mixed_precision: bf16
+  num_machines: 1
+  num_processes: 1
+  rdzv_backend: static
+  same_network: true
+  tpu_env: []
+  tpu_use_cluster: false
+  tpu_use_sudo: false
+  use_cpu: false
+  dynamo_backend: 'no'
+  fsdp_config: {}
+  megatron_lm_config: {}
+  deepspeed_config: {}
+  EOF
+
+  # Install accelerate
+  uv pip install accelerate
+  echo "========== Accelerate configuration complete =========="
+
+
+  # ========== Configure Jupyter ==========
+  mkdir -p ~/.jupyter
+  cat > ~/.jupyter/jupyter_notebook_config.py << EOF
+  c.NotebookApp.ip = '0.0.0.0'
+  c.NotebookApp.port = 8888
+  c.NotebookApp.open_browser = False
+  c.NotebookApp.allow_remote_access = True
+  EOF
+
+  # Auto-source virtual environment
+  echo 'source ~/sky_workdir/.venv/bin/activate' >> ~/.bashrc
+
+  # Verify distributed setup
+  echo "========== Verifying distributed setup =========="
+  source .venv/bin/activate
+  
+  # Test NCCL availability
+  python -c "
+  import torch
+  import torch.distributed as dist
+  print(f'NCCL available: {torch.distributed.is_nccl_available()}')
+  print(f'MPI available: {torch.distributed.is_mpi_available()}')
+  print(f'Number of GPUs: {torch.cuda.device_count()}')
+  "
+
+  # Set environment variables for optimal NCCL performance on H100
+  echo 'export NCCL_IB_DISABLE=1' >> ~/.bashrc
+  echo 'export NCCL_P2P_DISABLE=0' >> ~/.bashrc
+  echo 'export NCCL_DEBUG=INFO' >> ~/.bashrc
+  
+  # Set flash attention environment variables
+  echo 'export FLASH_ATTENTION_FORCE_FP16=1' >> ~/.bashrc
+  echo 'export TORCH_CUDNN_V8_API_ENABLED=1' >> ~/.bashrc
+
+  # Set environment variables for training
+  echo 'export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True' >> ~/.bashrc
+  echo 'export USE_LOCAL_DATASET=0' >> ~/.bashrc
+
+  echo "========== Distributed setup verification complete =========="
+
+run: |
+  echo "Starting ColBERT training for all configs in scripts/configs/fastvlm/..."
+  cd ~/sky_workdir
+  source .venv/bin/activate
+
+  MODEL_PATH=/gcs/colqwen-ns-models/colfastvlm-500-vidore-full/checkpoint-3694
+  OUTPUT_DIR=/gcs/colqwen-ns-models/colfastvlm-500-vidore-full/vidore_benchmark_metrics
+  mkdir -p "$OUTPUT_DIR"
+
+  vidore-benchmark evaluate-retriever \
+    --model-class fastvlm \
+    --model-name "$MODEL_PATH" \
+    --collection-name vidore/vidore-benchmark-667173f98e70a1c0fa4db00d \
+    --dataset-format qa \
+    --split test \
+    --output-dir "$OUTPUT_DIR"

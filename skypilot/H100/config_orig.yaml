@@ -1,0 +1,124 @@
+resources:
+  cloud: gcp
+  accelerators: H100:1
+  memory: 64+
+  disk_size: 256
+  use_spot: true # Use spot instances to save costs but understand that they can be terminated at any time.
+  any_of:
+    - region: us-east4
+    - region: us-central1
+    - region: us-east5
+    - region: us-west1
+    - region: us-west4
+
+file_mounts:
+  ~/sky_workdir/.env: ./.env
+  ~/.gitconfig: ~/.gitconfig
+
+workdir: .
+
+setup: |
+  echo -e "\n\n============   SKYPILOT SETUP: Start setup script.   ============\n\n"
+
+  # ========== Libraries ==========
+  sudo apt-get update
+  
+  # SSH server setup - careful configuration to ensure connectivity
+  # Don't purge the existing SSH server as this can break connectivity
+  sudo apt-get install -y --no-upgrade openssh-server
+  
+  # Ensure SSH service is running and enabled
+  sudo systemctl enable ssh
+  sudo systemctl restart ssh
+  
+  # Configure SSH to allow password authentication (as a backup)
+  sudo sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config
+  sudo sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
+  sudo systemctl restart ssh
+
+  # Install common utilities without upgrading the entire system
+  # This avoids disturbing the NVIDIA driver setup
+  sudo apt-get install -y --no-upgrade \
+      curl \
+      fzf \
+      git \
+      git-all \
+      htop \
+      nano \
+      unzip \
+      wget \
+      zip
+
+  # Install development tools and libraries without upgrading
+  sudo apt-get install -y --no-upgrade \
+      build-essential \
+      libbz2-dev \
+      libc6-dev \
+      libffi-dev \
+      libgdbm-dev \
+      liblzma-dev \
+      libncursesw5-dev \
+      libreadline-dev \
+      libsqlite3-dev \
+      libssl-dev \
+      zlib1g-dev
+  
+  echo -e "\n\n============   SKYPILOT SETUP: Installed apt-get libraries.   ============\n\n"
+
+
+  # ========== Setup .bashrc ==========
+  cat << 'EOF' >> ~/.bashrc
+
+  # =================================================================
+
+  # -------------- Aliases --------------
+  alias fzfenv="printenv | fzf"
+  alias fzfpip="pip freeze | fzf"
+  alias cvenv="python -m venv .venv"
+  alias avenv="source .venv/bin/activate"
+  alias gl="git log --oneline --graph --decorate"
+
+  if [ -f ~/.bash_aliases ]; then
+      . ~/.bash_aliases
+  fi
+
+  # =================================================================
+
+  EOF
+  echo -e "\n\n============   SKYPILOT SETUP: Initialized bashrc.   ============\n\n"
+  
+  
+  # ========== Reload .bashrc ==========
+  source ~/.bashrc
+  echo -e "\n\n============   SKYPILOT SETUP: Reloaded bashrc.   ============\n\n"
+
+
+  # ========== Set up Python ==========
+  # Install Miniconda instead of pyenv (more reliable)
+  wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O ~/miniconda.sh
+  bash ~/miniconda.sh -b -p $HOME/miniconda
+  rm ~/miniconda.sh
+
+  # Add conda to path
+  echo 'export PATH="$HOME/miniconda/bin:$PATH"' >> ~/.bashrc
+  export PATH="$HOME/miniconda/bin:$PATH"
+  
+  # Initialize conda
+  conda init bash
+  source ~/.bashrc
+
+  # Create conda environment with Python 3.12
+  conda create -y -n py312 python=3.12
+  echo -e "\n\n============   SKYPILOT SETUP: Installed Python 3.12 using Miniconda   ============\n\n"
+  
+  # Add conda environment activation to bashrc
+  echo 'conda activate py312' >> ~/.bashrc
+  conda activate py312
+  
+  # Install packages
+  cd ~/sky_workdir
+  
+  # Install pip packages directly (UV is optional)
+  pip install torch torchvision wandb jupyter python-dotenv pynvml colpali-engine[train]
+  
+  echo -e "\n\n============   SKYPILOT SETUP: Setup complete!   ============\n\n"

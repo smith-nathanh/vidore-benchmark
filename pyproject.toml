@@ -33,16 +33,29 @@ classifiers = [
 ]
 
 dependencies = [
-    "datasets>=2.15.0",
+    "accelerate>=0.34.0,<1.7.0",
+    "bitsandbytes",
+    "configue>=5.0.0",
+    "datasets>=2.19.1",
+    "gcsfs>=2025.3.0",
     "GPUtil>=1.4.0,<2.0.0",
-    "mteb>=1.16.3,<1.17.0",
+    "mteb>=1.16.3,<2",
+    "numpy",
+    "peft>=0.14.0,<0.16.0",
+    "pillow>=10.0.0,<11.3.0",
     "pydantic>=2.0.0,<3.0.0",
     "python-dotenv>=1.0.1,<2.0.0",
+    "requests",
+    "scipy",
     "sentence-transformers>=3.0.1,<4.0.0",
     "sentencepiece>=0.2.0,<1.0.0",
+    "skypilot[gcp]>=0.9.3",
     "tenacity>=8.0.0",
-    "transformers>=4.46.1",
-    "typer>=0.12.3,<1.0.0",
+    "timm>=1.0.19",
+    "torch>=2.6.0,<2.7.0",
+    "transformers>=4.51.1,<4.52.0",
+    "typer>=0.15.1",
+    "wandb>=0.21.4",
 ]
 
 [project.optional-dependencies]
@@ -67,7 +80,7 @@ all-retrievers = [
 
 all = ["vidore-benchmark[all-retrievers]", "vidore-benchmark[dev]"]
 
-skypilot = ["skypilot==0.6.1,<1.0.0"]
+skypilot = ["skypilot>=0.9.3,<1.0.0"]
 
 [project.urls]
 homepage = "https://github.com/illuin-tech/vidore-benchmark"
