@@ -34,7 +34,7 @@ classifiers = [
 
 dependencies = [
     "accelerate>=0.34.0,<1.7.0",
-    "bitsandbytes",
+    "bitsandbytes; sys_platform != 'darwin'",
     "configue>=5.0.0",
     "datasets>=2.19.1",
     "gcsfs>=2025.3.0",

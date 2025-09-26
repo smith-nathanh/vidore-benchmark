@@ -1,127 +1,22 @@
-"""ColFastVLM modeling wrapper adapted for the ViDoRe benchmark.
+"""ColFastVLM modeling wrapper.
 
-This module is derived from the user's FastVLM extension of ``colpali_engine`` and
-removes the dependency on that library so that FastVLM can be consumed directly
-from the benchmark package.
+Provides ColBERT-style multi-vector embeddings over FastVLM (LLaVA-Qwen2 based) models.
 """
 
-from __future__ import annotations
-
+import warnings
 import os
 import json
-import warnings
 from types import MethodType
-from typing import ClassVar, Optional, Dict, Any
+from typing import ClassVar, Optional
 
 import torch
 from torch import nn
 from transformers import AutoModelForCausalLM
 
-# Sentinel value used by the upstream FastVLM remote code when injecting image tokens.
-IMAGE_TOKEN_INDEX: ClassVar[int] = -200
-
-
-def _load_model_with_peft_support(
-    pretrained_model_name_or_path: str,
-    **kwargs
-) -> tuple[Any, Dict[str, torch.Tensor]]:
-    """
-    Load a model, automatically detecting if it's a PEFT checkpoint.
-    
-    Returns:
-        tuple: (model, custom_text_proj_state_dict)
-            - model: The loaded model (either base or with PEFT adapter merged)
-            - custom_text_proj_state_dict: State dict for custom_text_proj layer if found, else empty dict
-    """
-    custom_text_proj_state = {}
-    model_kwargs = dict(kwargs)
-    model_kwargs.setdefault("trust_remote_code", True)
-    
-    # Check if this is a PEFT checkpoint
-    adapter_config_path = os.path.join(pretrained_model_name_or_path, "adapter_config.json")
-    is_peft_checkpoint = os.path.isfile(adapter_config_path)
-    
-    if is_peft_checkpoint:
-        try:
-            from peft import PeftModel
-            from safetensors import safe_open
-        except ImportError:
-            raise ImportError(
-                "PEFT and safetensors are required to load LoRA checkpoints. "
-                "Install with: pip install peft safetensors"
-            )
-        
-        # Read adapter config to find base model
-        with open(adapter_config_path, 'r') as f:
-            adapter_config = json.load(f)
-        
-        # Get base model name, fallback to FastVLM if not specified
-        base_model_name = adapter_config.get("base_model_name_or_path")
-        if not base_model_name:
-            # Default to FastVLM base model if not specified
-            base_model_name = "apple/FastVLM-0.5B"
-            print(f"No base model specified in adapter config, using default: {base_model_name}")
-        
-        print(f"Loading PEFT model from {pretrained_model_name_or_path}")
-        print(f"Base model: {base_model_name}")
-        
-        # Load base model
-        base_model = AutoModelForCausalLM.from_pretrained(
-            base_model_name,
-            **model_kwargs
-        )
-        
-        peft_model = PeftModel.from_pretrained(base_model, pretrained_model_name_or_path)
-
-        has_lora_parameters = any("lora_" in name for name, _ in peft_model.named_parameters())
-        if not has_lora_parameters:
-            raise RuntimeError(
-                "Loaded FastVLM checkpoint without LoRA adapters. "
-                "Ensure the adapter_config target modules match the training setup."
-            )
-
-        model = peft_model.merge_and_unload()
-
-        custom_proj_path = os.path.join(pretrained_model_name_or_path, "custom_text_proj.pt")
-        if os.path.exists(custom_proj_path):
-            custom_text_proj_state = torch.load(custom_proj_path, map_location="cpu")
-            print(f"Loaded custom_text_proj from {custom_proj_path}")
-        else:
-            adapter_weights_path = os.path.join(pretrained_model_name_or_path, "adapter_model.safetensors")
-            if os.path.exists(adapter_weights_path):
-                with safe_open(adapter_weights_path, framework="pt", device="cpu") as f:
-                    for key in f.keys():
-                        if "custom_text_proj.weight" in key:
-                            custom_text_proj_state["weight"] = f.get_tensor(key)
-                            print("Found custom_text_proj.weight in adapter")
-                        elif "custom_text_proj.bias" in key:
-                            custom_text_proj_state["bias"] = f.get_tensor(key)
-                            print("Found custom_text_proj.bias in adapter")
-            if not custom_text_proj_state:
-                warnings.warn(
-                    "custom_text_proj.pt not found alongside the LoRA adapters. "
-                    "Falling back to randomly initialized projection head.",
-                    RuntimeWarning,
-                )
-    else:
-        # Standard model loading
-        model = AutoModelForCausalLM.from_pretrained(
-            pretrained_model_name_or_path,
-            **model_kwargs
-        )
-        
-        # Check if there's a separate custom_text_proj file
-        custom_proj_path = os.path.join(pretrained_model_name_or_path, "custom_text_proj.pt")
-        if os.path.exists(custom_proj_path):
-            custom_text_proj_state = torch.load(custom_proj_path, map_location="cpu")
-            print(f"Loaded custom_text_proj from {custom_proj_path}")
-    
-    return model, custom_text_proj_state
+from .llava_qwen import IMAGE_TOKEN_INDEX
 
 
 class ColFastVLM(nn.Module):
-    """Return ColBERT-style embeddings on top of the Hugging Face FastVLM checkpoints."""
-
     main_input_name: ClassVar[str] = "doc_input_ids"
 
     def __init__(
@@ -133,36 +28,75 @@ class ColFastVLM(nn.Module):
         **kwargs,
     ) -> None:
         super().__init__()
-        
-        # Load model with PEFT support
-        self.model, custom_text_proj_state = _load_model_with_peft_support(
-            pretrained_model_name_or_path,
-            **kwargs
-        )
-        
+
+        # Check if this is a PEFT checkpoint and handle accordingly
+        adapter_config_path = os.path.join(pretrained_model_name_or_path, "adapter_config.json")
+        is_peft_checkpoint = os.path.isfile(adapter_config_path)
+
+        custom_text_proj_state = {}
+
+        if is_peft_checkpoint:
+            # For PEFT checkpoints, we need to restore the exact training structure
+            from peft import PeftModel
+            from safetensors import safe_open
+
+            # Read adapter config to find base model
+            with open(adapter_config_path, 'r') as f:
+                adapter_config = json.load(f)
+
+            base_model_name = adapter_config.get("base_model_name_or_path", "apple/FastVLM-0.5B")
+            print(f"Loading PEFT model from {pretrained_model_name_or_path}")
+            print(f"Base model: {base_model_name}")
+
+            # Load base model
+            self.model = AutoModelForCausalLM.from_pretrained(base_model_name, **kwargs)
+
+            # Load PEFT adapter - this creates the structure the checkpoint expects
+            peft_model = PeftModel.from_pretrained(self, pretrained_model_name_or_path)
+
+            # Merge LoRA weights and extract the model
+            merged_model = peft_model.merge_and_unload()
+            self.model = merged_model.model
+
+            # Load custom_text_proj weights
+            adapter_weights_path = os.path.join(pretrained_model_name_or_path, "adapter_model.safetensors")
+            if os.path.exists(adapter_weights_path):
+                with safe_open(adapter_weights_path, framework="pt", device="cpu") as f:
+                    for key in f.keys():
+                        if "custom_text_proj.weight" in key:
+                            custom_text_proj_state["weight"] = f.get_tensor(key)
+                            print("Found custom_text_proj.weight in adapter")
+                        elif "custom_text_proj.bias" in key:
+                            custom_text_proj_state["bias"] = f.get_tensor(key)
+                            print("Found custom_text_proj.bias in adapter")
+        else:
+            # Standard model loading
+            self.model = AutoModelForCausalLM.from_pretrained(pretrained_model_name_or_path, **kwargs)
+
         self.config = self.model.config
         self.mask_non_image_embeddings = mask_non_image_embeddings
         self.dim = dim
         self.fuse_in_decoder = fuse_in_decoder
-        
-        # Initialize custom_text_proj layer
         self.custom_text_proj = nn.Linear(self.config.hidden_size, dim)
-        
-        # Load saved weights if available, otherwise initialize
+
+        # Load custom_text_proj weights if available
         if custom_text_proj_state:
             if "weight" in custom_text_proj_state:
                 self.custom_text_proj.weight.data = custom_text_proj_state["weight"]
+                print("Loaded custom_text_proj weights from checkpoint")
             if "bias" in custom_text_proj_state:
                 self.custom_text_proj.bias.data = custom_text_proj_state["bias"]
-            print("Loaded custom_text_proj weights from checkpoint")
         else:
+            # Initialize normally if no saved weights
             nn.init.normal_(self.custom_text_proj.weight, std=0.02)
             nn.init.zeros_(self.custom_text_proj.bias)
-            print("Initialized custom_text_proj with random weights")
-        
-        # Move to correct device and dtype
-        param = next(self.model.parameters())
-        self.custom_text_proj = self.custom_text_proj.to(device=param.device, dtype=param.dtype)
+        # Move custom_text_proj to the same device and dtype as the model
+        if hasattr(self.model, "device"):
+            self.custom_text_proj = self.custom_text_proj.to(device=self.model.device, dtype=self.model.dtype)
+        else:
+            # Get device and dtype from model parameters
+            param = next(self.model.parameters())
+            self.custom_text_proj = self.custom_text_proj.to(device=param.device, dtype=param.dtype)
 
     def forward(
         self,
@@ -172,7 +106,7 @@ class ColFastVLM(nn.Module):
         past_key_values: Optional[torch.FloatTensor] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         labels: Optional[torch.LongTensor] = None,
-        use_cache: Optional[bool] = False,
+        use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         images: Optional[torch.FloatTensor] = None,
@@ -180,10 +114,12 @@ class ColFastVLM(nn.Module):
         return_dict: Optional[bool] = None,
         **kwargs,
     ) -> torch.Tensor:
+        # Remove unused arguments to avoid conflicts
         kwargs.pop("output_hidden_states", None)
         kwargs.pop("return_dict", None)
         text_only_input_ids = kwargs.pop("text_input_ids", None)
 
+        # Convert images to correct dtype if provided
         if images is not None:
             images = images.to(device=self.device, dtype=self.model.dtype)
 
@@ -241,8 +177,7 @@ class ColFastVLM(nn.Module):
             except Exception as error:  # pragma: no cover - defensive fallback
                 warnings.warn(
                     "Fused decoder path failed; falling back to non-fused FastVLM processing. "
-                    "Set fuse_in_decoder=False to silence this warning.\n"
-                    f"Error: {error}"
+                    f"Set fuse_in_decoder=False to silence this warning.\nError: {error}"
                 )
                 use_fused = False
                 hidden = None
@@ -359,6 +294,7 @@ class ColFastVLM(nn.Module):
 
     @property
     def patch_size(self) -> int:
+        # FastVLM/MobileCLIP uses 64x64 patches
         if hasattr(self.model.model, "vision_tower") and hasattr(self.model.model.vision_tower, "config"):
             vision_config = self.model.model.vision_tower.config
             if isinstance(vision_config, dict) and "image_cfg" in vision_config:
@@ -418,6 +354,7 @@ class ColFastVLM(nn.Module):
             if not image_positions:
                 continue
 
+            # Assume single visual asset per document (current data pipeline)
             position = image_positions[0]
             seq_len = int(new_attention_mask[batch_idx].sum().item())
             start = max_len - seq_len if padding_side == "left" else 0

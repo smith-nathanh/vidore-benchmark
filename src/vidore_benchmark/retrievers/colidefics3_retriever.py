@@ -48,13 +48,20 @@ class ColIdefics3Retriever(BaseVisionRetriever):
         self.device = get_torch_device(device)
         self.num_workers = num_workers
 
+        # Use float32 for MPS compatibility (MPS doesn't support float64)
+        if self.device == "mps":
+            logger.info("Using float32 for MPS compatibility with ColSmol/ColIdefics3.")
+            torch_dtype = torch.float32
+        else:
+            torch_dtype = torch.bfloat16
+
         # Load the model and LORA adapter
         self.model = cast(
             ColIdefics3,
             ColIdefics3.from_pretrained(
                 pretrained_model_name_or_path,
-                torch_dtype=torch.bfloat16,
-                device_map=device,
+                torch_dtype=torch_dtype,
+                device_map=self.device,
                 attn_implementation="flash_attention_2" if is_flash_attn_2_available() else None,
             ).eval(),
         )
@@ -83,7 +90,12 @@ class ColIdefics3Retriever(BaseVisionRetriever):
         qs = []
         for batch_query in tqdm(dataloader, desc="Forward pass queries...", leave=False):
             with torch.no_grad():
-                batch_query = {k: v.to(self.device) for k, v in batch_query.items()}
+                # Convert to float32 if on MPS to avoid float64 issues
+                if self.device == "mps":
+                    batch_query = {k: v.to(self.device, dtype=torch.float32 if v.dtype == torch.float64 else v.dtype)
+                                   for k, v in batch_query.items()}
+                else:
+                    batch_query = {k: v.to(self.device) for k, v in batch_query.items()}
                 embeddings_query = self.model(**batch_query)
                 qs.extend(list(torch.unbind(embeddings_query.to("cpu"))))
 
@@ -101,7 +113,12 @@ class ColIdefics3Retriever(BaseVisionRetriever):
         ds = []
         for batch_doc in tqdm(dataloader, desc="Forward pass documents...", leave=False):
             with torch.no_grad():
-                batch_doc = {k: v.to(self.device) for k, v in batch_doc.items()}
+                # Convert to float32 if on MPS to avoid float64 issues
+                if self.device == "mps":
+                    batch_doc = {k: v.to(self.device, dtype=torch.float32 if v.dtype == torch.float64 else v.dtype)
+                                 for k, v in batch_doc.items()}
+                else:
+                    batch_doc = {k: v.to(self.device) for k, v in batch_doc.items()}
                 embeddings_doc = self.model(**batch_doc)
             ds.extend(list(torch.unbind(embeddings_doc.to("cpu"))))
         return ds

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import logging
+import os
 from typing import Dict, List, Optional, Union, cast
 
 import torch
@@ -10,11 +12,11 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers.utils.import_utils import is_flash_attn_2_available
 
+from vidore_benchmark.integrations.fastvlm import ColFastVLM, ColFastVLMProcessor
 from vidore_benchmark.retrievers.base_vision_retriever import BaseVisionRetriever
 from vidore_benchmark.retrievers.registry_utils import register_vision_retriever
 from vidore_benchmark.utils.data_utils import ListDataset
 from vidore_benchmark.utils.torch_utils import get_torch_device
-from vidore_benchmark.integrations.fastvlm import ColFastVLM, ColFastVLMProcessor
 
 logger = logging.getLogger(__name__)
 
@@ -71,13 +73,15 @@ class FastVLMRetriever(BaseVisionRetriever):
         if processor_kwargs:
             processor_extra_kwargs.update(processor_kwargs)
 
-        # For PEFT checkpoints, load processor from parent directory where tokenizer files are
+        # For PEFT checkpoints, load processor from base model
         processor_path = pretrained_model_name_or_path
-        import os
-        if os.path.exists(os.path.join(pretrained_model_name_or_path, "adapter_config.json")):
-            # This is a PEFT checkpoint, use parent directory for processor
-            processor_path = os.path.dirname(pretrained_model_name_or_path)
-            print(f"Using processor path: {processor_path} (parent of PEFT checkpoint)")
+        adapter_config_path = os.path.join(pretrained_model_name_or_path, "adapter_config.json")
+        if os.path.exists(adapter_config_path):
+            # This is a PEFT checkpoint, use base model for processor
+            with open(adapter_config_path, 'r') as f:
+                adapter_config = json.load(f)
+            processor_path = adapter_config.get("base_model_name_or_path", "apple/FastVLM-0.5B")
+            print(f"Using processor from base model: {processor_path}")
 
         self.processor = cast(
             ColFastVLMProcessor,
